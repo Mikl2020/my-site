@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neon Match-3</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --panel-color: #1e293b;
+            --text-color: #f8fafc;
+            --accent: #38bdf8;
+        }
+        
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
+            max-width: 480px;
+            margin-bottom: 20px;
+            padding: 15px 25px;
+            background: var(--panel-color);
+            border-radius: 15px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+            box-sizing: border-box;
+        }
+
+        .score-container {
+            font-size: 24px;
+            font-weight: bold;
+            text-shadow: 0 0 10px rgba(56, 189, 248, 0.5);
+        }
+
+        button {
+            background: linear-gradient(135deg, #38bdf8, #818cf8);
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            color: white;
+            font-weight: bold;
+            font-size: 16px;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            box-shadow: 0 4px 15px rgba(56, 189, 248, 0.4);
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(56, 189, 248, 0.6);
+        }
+
+        button:active {
+            transform: translateY(1px);
+        }
+
+        #gameCanvas {
+            background: var(--panel-color);
+            border-radius: 15px;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.6);
+            cursor: pointer;
+            touch-action: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <div class="score-container">Очки: <span id="score">0</span></div>
+        <button id="restartBtn">Начать заново</button>
+    </div>
+
+    <canvas id="gameCanvas" width="480" height="480"></canvas>
+
+<script>
+/**
+ * --- КОНСТАНТЫ И НАСТРОЙКИ ---
+ */
+const CANVAS = document.getElementById('gameCanvas');
+const CTX = CANVAS.getContext('2d');
+const SCORE_EL = document.getElementById('score');
+
+const ROWS = 8;
+const COLS = 8;
+const SIZE = CANVAS.width / COLS; // Размер ячейки (60px)
+const TYPES = 6; // Количество типов фишек
+
+// Палитра и формы
+const GEMS = [
+    { color: '#ef4444', glow: '#fca5a5', shape: 'circle' },   // Красный
+    { color: '#3b82f6', glow: '#93c5fd', shape: 'diamond' },  // Синий
+    { color: '#10b981', glow: '#6ee7b7', shape: 'square' },   // Зеленый
+    { color: '#f59e0b', glow: '#fcd34d', shape: 'triangle' }, // Желтый
+    { color: '#8b5cf6', glow: '#c4b5fd', shape: 'hexagon' },  // Фиолетовый
+    { color: '#06b6d4', glow: '#67e8f9', shape: 'star' }      // Голубой
+];
+
+// Состояния конечного автомата игры
+const STATE = {
+    IDLE: 0,
+    SWAPPING: 1,
+    ANIMATING: 2,
+    DROPPING: 3
+};
+
+/**
+ * --- УТИЛИТЫ ---
+ */
+// Линейная интерполяция для плавных анимаций
+const lerp = (start, end, amt) => (1 - amt) * start + amt * end;
+
+/**
+ * --- КЛАССЫ (DATA & VIEW) ---
+ */
+
+// Система частиц для красивых эффектов взрыва
+class Particle {
+    constructor(x, y, color) {
+        this.x = x;
+        this.y = y;
+        this.vx = (Math.random() - 0.5) * 10;
+        this.vy = (Math.random() - 0.5) * 10;
+        this.life = 1.0;
+        this.color = color;
+        this.size = Math.random() * 4 + 2;
+    }
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.life -= 0.03;
+    }
+    draw(ctx) {
+        ctx.globalAlpha = Math.max(0, this.life);
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1.0;
+    }
+}
+
+// Класс фишки (и логика, и отрисовка)
+class Gem {
+    constructor(r, c, type, isNew = false) {
+        this.r = r;
+        this.c = c;
+        this.type = type;
+        
+        // Визуальные координаты
+        this.x = c * SIZE + SIZE / 2;
+        this.y = isNew ? -SIZE : r * SIZE + SIZE / 2; // Если новая - падает сверху
+        
+        this.scale = isNew ? 0 : 1; // Появление через увеличение
+        this.isDying = false;
+    }
+
+    // Обновление анимаций перемещения и исчезновения
+    update() {
+        let isMoving = false;
+        const targetX = this.c * SIZE + SIZE / 2;
+        const targetY = this.r * SIZE + SIZE / 2;
+        const targetScale = this.isDying ? 0 : 1;
+
+        if (Math.abs(this.x - targetX) > 0.5 || Math.abs(this.y - targetY) > 0.5) {
+            this.x = lerp(this.x, targetX, 0.2);
+            this.y = lerp(this.y, targetY, 0.2);
+            isMoving = true;
+        } else {
+            this.x = targetX;
+            this.y = targetY;
+        }
+
+        if (Math.abs(this.scale - targetScale) > 0.01) {
+            this.scale = lerp(this.scale, targetScale, 0.15);
+            isMoving = true;
+        }
+
+        return isMoving;
+    }
+
+    draw(ctx) {
+        if (this.scale <= 0) return;
+        
+        const gemDef = GEMS[this.type];
+        const s = (SIZE / 2 - 8) * this.scale; // Базовый размер с отступами
+
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        
+        // Тень/Свечение
+        ctx.shadowColor = gemDef.glow;
+        ctx.shadowBlur = 10;
+        
+        ctx.fillStyle = gemDef.color;
+        ctx.beginPath();
+
+        // Отрисовка разных форм
+        switch (gemDef.shape) {
+            case 'circle':
+                ctx.arc(0, 0, s, 0, Math.PI * 2);
+                break;
+            case 'diamond':
+                ctx.moveTo(0, -s); ctx.lineTo(s, 0); ctx.lineTo(0, s); ctx.lineTo(-s, 0);
+                break;
+            case 'square':
+                ctx.roundRect(-s, -s, s * 2, s * 2, 8);
+                break;
+            case 'triangle':
+                ctx.moveTo(0, -s); ctx.lineTo(s, s); ctx.lineTo(-s, s);
+                break;
+            case 'hexagon':
+                for (let i = 0; i < 6; i++) {
+                    const angle = (Math.PI / 3) * i;
+                    ctx.lineTo(s * Math.cos(angle), s * Math.sin(angle));
+                }
+                break;
+            case 'star':
+                for (let i = 0; i < 5; i++) {
+                    const angle = (Math.PI / 5) * (i * 2 - 1) - Math.PI / 2;
+                    ctx.lineTo(s * Math.cos(angle), s * Math.sin(angle));
+                    const nextAngle = angle + Math.PI / 5;
+                    ctx.lineTo((s / 2) * Math.cos(nextAngle), (s / 2) * Math.sin(nextAngle));
+                }
+                break;
+        }
+        ctx.closePath();
+        ctx.fill();
+        
+        // Блик
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+        ctx.beginPath();
+        ctx.arc(-s/3, -s/3, s/4, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+    }
+}
+
+/**
+ * --- ГЛАВНЫЙ КЛАСС ИГРЫ ---
+ */
+class Game {
+    constructor() {
+        this.grid = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
+        this.particles = [];
+        this.state = STATE.IDLE;
+        this.score = 0;
+        
+        this.selected = null; // Выбранная ячейка {r, c}
+        this.swapData = null; // Данные текущего обмена
+
+        this.init();
+        this.bindEvents();
+        this.loop();
+    }
+
+    init() {
+        this.score = 0;
+        this.updateScore();
+        this.selected = null;
+        this.particles = [];
+        this.state = STATE.IDLE;
+
+        // Генерация поля БЕЗ начальных совпадений
+        for (let r = 0; r < ROWS; r++) {
+            for (let c = 0; c < COLS; c++) {
+                let type;
+                do {
+                    type = Math.floor(Math.random() * TYPES);
+                } while (this.createsMatchOnSpawn(r, c, type));
+                
+                this.grid[r][c] = new Gem(r, c, type, true);
+            }
+        }
+    }
+
+    createsMatchOnSpawn(r, c, type) {
+        // Проверка слева
+        if (c >= 2 && this.grid[r][c-1].type === type && this.grid[r][c-2].type === type) return true;
+        // Проверка сверху
+        if (r >= 2 && this.grid[r-1][c].type === type && this.grid[r-2][c].type === type) return true;
+        return false;
+    }
+
+    bindEvents() {
+        // Управление мышью / тапом
+        CANVAS.addEventListener('pointerdown', (e) => {
+            if (this.state !== STATE.IDLE) return;
+
+            const rect = CANVAS.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            
+            const c = Math.floor(x / SIZE);
+            const r = Math.floor(y / SIZE);
+
+            if (r >= 0 && r < ROWS && c >= 0 && c < COLS) {
+                this.handleSelection(r, c);
+            }
+        });
+
+        document.getElementById('restartBtn').addEventListener('click', () => this.init());
+    }
+
+    handleSelection(r, c) {
+        if (!this.selected) {
+            this.selected = { r, c };
+        } else {
+            const dr = Math.abs(this.selected.r - r);
+            const dc = Math.abs(this.selected.c - c);
+
+            // Если кликнули на соседнюю (по кресту)
+            if ((dr === 1 && dc === 0) || (dr === 0 && dc === 1)) {
+                this.trySwap(this.selected.r, this.selected.c, r, c);
+                this.selected = null;
+            } else if (dr === 0 && dc === 0) {
+                this.selected = null; // Отмена выбора
+            } else {
+                this.selected = { r, c }; // Выбор новой
+            }
+        }
+    }
+
+    trySwap(r1, c1, r2, c2) {
+        this.state = STATE.SWAPPING;
+        
+        // Логический обмен
+        const temp = this.grid[r1][c1];
+        this.grid[r1][c1] = this.grid[r2][c2];
+        this.grid[r2][c2] = temp;
+
+        // Обновление координат для анимации
+        this.grid[r1][c1].r = r1;
+        this.grid[r1][c1].c = c1;
+        this.grid[r2][c2].r = r2;
+        this.grid[r2][c2].c = c2;
+
+        this.swapData = { r1, c1, r2, c2 };
+    }
+
+    findMatches() {
+        const matches = new Set();
+
+        // Горизонтальные
+        for (let r = 0; r < ROWS; r++) {
+            for (let c = 0; c < COLS - 2; c++) {
+                const type = this.grid[r][c]?.type;
+                if (type == null) continue;
+                if (this.grid[r][c+1]?.type === type && this.grid[r][c+2]?.type === type) {
+                    matches.add(this.grid[r][c]);
+                    matches.add(this.grid[r][c+1]);
+                    matches.add(this.grid[r][c+2]);
+                    // Обработка 4 и 5 в ряд
+                    let i = 3;
+                    while(c + i < COLS && this.grid[r][c+i]?.type === type) {
+                        matches.add(this.grid[r][c+i]);
+                        i++;
+                    }
+                }
+            }
+        }
+
+        // Вертикальные
+        for (let c = 0; c < COLS; c++) {
+            for (let r = 0; r < ROWS - 2; r++) {
+                const type = this.grid[r][c]?.type;
+                if (type == null) continue;
+                if (this.grid[r+1][c]?.type === type && this.grid[r+2][c]?.type === type) {
+                    matches.add(this.grid[r][c]);
+                    matches.add(this.grid[r+1][c]);
+                    matches.add(this.grid[r+2][c]);
+                    let i = 3;
+                    while(r + i < ROWS && this.grid[r+i][c]?.type === type) {
+                        matches.add(this.grid[r+i][c]);
+                        i++;
+                    }
+                }
+            }
+        }
+
+        return Array.from(matches);
+    }
+
+    processMatches(matches) {
+        if (matches.length > 0) {
+            this.state = STATE.ANIMATING;
+            this.score += matches.length * 10;
+            this.updateScore();
+
+            matches.forEach(gem => {
+                gem.isDying = true;
+                
+                // Создание частиц
+                for(let i=0; i<8; i++) {
+                    this.particles.push(new Particle(gem.x, gem.y, GEMS[gem.type].color));
+                }
+            });
+
+            // Ждем завершения анимации уменьшения, затем удаляем и роняем
+            setTimeout(() => {
+                matches.forEach(gem => {
+                    this.grid[gem.r][gem.c] = null;
+                });
+                this.applyGravity();
+            }, 300); // 300мс на анимацию исчезновения
+        } else if (this.swapData) {
+            // Если после обмена совпадений нет - меняем обратно
+            const { r1, c1, r2, c2 } = this.swapData;
+            this.swapData = null; // чтобы не зациклить
+            this.trySwap(r1, c1, r2, c2);
+        } else {
+            this.state = STATE.IDLE;
+        }
+    }
+
+    applyGravity() {
+        this.state = STATE.DROPPING;
+        let animated = false;
+
+        // Смещение вниз
+        for (let c = 0; c < COLS; c++) {
+            for (let r = ROWS - 1; r >= 0; r--) {
+                if (this.grid[r][c] === null) {
+                    // Ищем фишку выше
+                    for (let k = r - 1; k >= 0; k--) {
+                        if (this.grid[k][c] !== null) {
+                            this.grid[r][c] = this.grid[k][c];
+                            this.grid[r][c].r = r;
+                            this.grid[k][c] = null;
+                            animated = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Заполнение пустых мест сверху
+        for (let c = 0; c < COLS; c++) {
+            for (let r = 0; r < ROWS; r++) {
+                if (this.grid[r][c] === null) {
+                    const type = Math.floor(Math.random() * TYPES);
+                    this.grid[r][c] = new Gem(r, c, type, true);
+                    animated = true;
+                }
+            }
+        }
+
+        // Ждем пока все упадет, затем рекурсивно проверяем каскады
+        const checkDropComplete = () => {
+            let stillMoving = false;
+            for(let r=0; r<ROWS; r++) {
+                for(let c=0; c<COLS; c++) {
+                    if(this.grid[r][c] && this.grid[r][c].update()) stillMoving = true;
+                }
+            }
+            
+            if (!stillMoving) {
+                const newMatches = this.findMatches();
+                if (newMatches.length > 0) {
+                    this.processMatches(newMatches);
+                } else {
+                    this.state = STATE.IDLE;
+                }
+            } else {
+                requestAnimationFrame(checkDropComplete);
+            }
+        };
+        
+        requestAnimationFrame(checkDropComplete);
+    }
+
+    updateScore() {
+        SCORE_EL.innerText = this.score;
+        // Небольшая анимация увеличения счета
+        SCORE_EL.style.transform = 'scale(1.5)';
+        SCORE_EL.style.color = '#38bdf8';
+        setTimeout(() => {
+            SCORE_EL.style.transform = 'scale(1)';
+            SCORE_EL.style.color = 'var(--text-color)';
+        }, 150);
+    }
+
+    update() {
+        let isAnimating = false;
+
+        // Обновление фишек
+        for (let r = 0; r < ROWS; r++) {
+            for (let c = 0; c < COLS; c++) {
+                if (this.grid[r][c]) {
+                    if (this.grid[r][c].update()) isAnimating = true;
+                }
+            }
+        }
+
+        // Обновление частиц
+        for (let i = this.particles.length - 1; i >= 0; i--) {
+            this.particles[i].update();
+            if (this.particles[i].life <= 0) {
+                this.particles.splice(i, 1);
+            }
+        }
+
+        // Логика состояний на основе анимации
+        if (this.state === STATE.SWAPPING && !isAnimating) {
+            this.processMatches(this.findMatches());
+        }
+    }
+
+    draw() {
+        // Очистка
+        CTX.clearRect(0, 0, CANVAS.width, CANVAS.height);
+
+        // Рисуем сетку (Фон)
+        CTX.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+        CTX.lineWidth = 2;
+        for (let i = 1; i < ROWS; i++) {
+            CTX.beginPath(); CTX.moveTo(0, i * SIZE); CTX.lineTo(CANVAS.width, i * SIZE); CTX.stroke();
+            CTX.beginPath(); CTX.moveTo(i * SIZE, 0); CTX.lineTo(i * SIZE, CANVAS.height); CTX.stroke();
+        }
+
+        // Выделение текущей ячейки
+        if (this.selected) {
+            CTX.fillStyle = 'rgba(255, 255, 255, 0.15)';
+            CTX.fillRect(this.selected.c * SIZE, this.selected.r * SIZE, SIZE, SIZE);
+            CTX.strokeStyle = '#38bdf8';
+            CTX.lineWidth = 3;
+            CTX.strokeRect(this.selected.c * SIZE, this.selected.r * SIZE, SIZE, SIZE);
+        }
+
+        // Отрисовка фишек
+        for (let r = 0; r < ROWS; r++) {
+            for (let c = 0; c < COLS; c++) {
+                if (this.grid[r][c]) this.grid[r][c].draw(CTX);
+            }
+        }
+
+        // Отрисовка частиц
+        this.particles.forEach(p => p.draw(CTX));
+    }
+
+    loop = () => {
+        this.update();
+        this.draw();
+        requestAnimationFrame(this.loop);
+    }
+}
+
+// Запуск игры
+window.onload = () => {
+    new Game();
+};
+</script>
+</body>
+</html>
